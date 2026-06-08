@@ -1,17 +1,61 @@
 import os
+from datetime import datetime, timedelta, timezone
 from dotenv import load_dotenv
 import requests
 import smtplib
 import ssl
 from email.message import EmailMessage
+import arxiv
 import config
 
 load_dotenv()
 
 
-def fetch_papers():
-    """Fetch recent papers from arXiv for the categories in config.ARXIV_CATEGORIES."""
-    pass
+def fetch_papers() -> list:
+    """Fetch recent papers from arXiv in the last 7 days and attach citation counts.
+
+    Returns a list of dicts with: title, authors, abstract, link, citation_count.
+    """
+    categories = getattr(config, "ARXIV_CATEGORIES", ["cs.AI", "cs.LG", "cs.CL"])
+    max_results = getattr(config, "ARXIV_MAX_RESULTS", 20)
+    query = " OR ".join([f"cat:{cat}" for cat in categories])
+    cutoff = datetime.now(timezone.utc) - timedelta(days=7)
+
+    search = arxiv.Search(
+        query=query,
+        max_results=max_results,
+        sort_by=arxiv.SortCriterion.SubmittedDate,
+        sort_order=arxiv.SortOrder.Descending,
+    )
+
+    client = arxiv.Client()
+    papers = []
+    for result in client.results(search):
+        if result.published is None or result.published < cutoff:
+            continue
+
+        arxiv_id = result.entry_id.rsplit("/", 1)[-1]
+        citation_count = _fetch_semantic_scholar_citations(arxiv_id)
+        papers.append({
+            "title": result.title,
+            "authors": [author.name for author in result.authors],
+            "abstract": result.summary,
+            "link": result.pdf_url or result.entry_id,
+            "citation_count": citation_count,
+        })
+
+    return papers
+
+
+def _fetch_semantic_scholar_citations(arxiv_id: str) -> int:
+    endpoint = f"https://api.semanticscholar.org/graph/v1/paper/arXiv:{arxiv_id}?fields=citationCount"
+    try:
+        resp = requests.get(endpoint, timeout=10)
+        resp.raise_for_status()
+        data = resp.json()
+        return int(data.get("citationCount", 0))
+    except Exception:
+        return 0
 
 
 def fetch_repos():
