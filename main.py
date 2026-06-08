@@ -58,9 +58,55 @@ def _fetch_semantic_scholar_citations(arxiv_id: str) -> int:
         return 0
 
 
-def fetch_repos():
-    """Fetch trending AI/ML repos from GitHub using config.GITHUB_TOPICS."""
-    pass
+def fetch_repos() -> list:
+    """Fetch trending AI/ML repos from GitHub using config.GITHUB_TOPICS.
+
+    Returns a list of dicts with: name, description, stars, url.
+    """
+    github_token = os.getenv("GITHUB_TOKEN")
+    if not github_token:
+        print("Missing GITHUB_TOKEN in environment; fetch_repos cannot run.")
+        return []
+
+    topics = getattr(config, "GITHUB_TOPICS", ["machine-learning", "deep-learning", "llm"])
+    max_repos = getattr(config, "GITHUB_MAX_REPOS", 10)
+
+    if topics:
+        topic_query = " ".join([f"topic:{topic}" for topic in topics])
+    else:
+        topic_query = ""
+
+    one_week_ago = (datetime.now(timezone.utc) - timedelta(days=7)).date().isoformat()
+    query_parts = [topic_query, f"pushed:>={one_week_ago}"]
+    query = " ".join(part for part in query_parts if part).strip()
+
+    headers = {
+        "Accept": "application/vnd.github.v3+json",
+        "Authorization": f"token {github_token}",
+    }
+    params = {
+        "q": query,
+        "sort": "stars",
+        "order": "desc",
+        "per_page": max_repos,
+    }
+
+    try:
+        response = requests.get("https://api.github.com/search/repositories", headers=headers, params=params, timeout=10)
+        response.raise_for_status()
+        data = response.json()
+        repos = []
+        for item in data.get("items", []):
+            repos.append({
+                "name": item.get("full_name"),
+                "description": item.get("description") or "",
+                "stars": item.get("stargazers_count", 0),
+                "url": item.get("html_url"),
+            })
+        return repos
+    except Exception as exc:
+        print(f"GitHub repo search failed: {exc}")
+        return []
 
 
 def fetch_news() -> list:
