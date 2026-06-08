@@ -1,0 +1,6 @@
+python-dotenv
+requests
+arxiv
+feedparser
+anthropic
+# sendgrid removed; using Gmail SMTP (stdlib)
