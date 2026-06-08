@@ -5,6 +5,7 @@ import requests
 import smtplib
 import ssl
 from email.message import EmailMessage
+import anthropic
 import arxiv
 import config
 
@@ -110,43 +111,133 @@ def fetch_repos() -> list:
 
 
 def fetch_news() -> list:
-    """Fetch recent news from Hacker News using the public Firebase API.
+    """Fetch recent AI/ML news from Hacker News top and new stories.
 
-    Returns a list of dicts with keys: `title`, `url`, `by`, `time`, `id`.
+    Returns a list of dicts with: title, url, points.
     """
-    try:
-        top_resp = requests.get("https://hacker-news.firebaseio.com/v0/topstories.json", timeout=10)
-        top_resp.raise_for_status()
-        ids = top_resp.json()
-    except Exception:
-        return []
+    keywords = [
+        "ai",
+        "ml",
+        "llm",
+        "machine learning",
+        "deep learning",
+        "artificial intelligence",
+        "neural network",
+        "transformer",
+        "transformers",
+    ]
+    max_items = getattr(config, "NEWS_MAX_ARTICLES", 20)
+    story_ids = []
 
-    stories = []
-    max_items = getattr(config, "NEWS_MAX_ARTICLES", 10)
-    for story_id in ids[:max_items]:
+    def load_ids(endpoint: str):
+        try:
+            resp = requests.get(endpoint, timeout=10)
+            resp.raise_for_status()
+            return resp.json() or []
+        except Exception:
+            return []
+
+    top_ids = load_ids("https://hacker-news.firebaseio.com/v0/topstories.json")
+    new_ids = load_ids("https://hacker-news.firebaseio.com/v0/newstories.json")
+
+    seen = set()
+    for story_id in top_ids + new_ids:
+        if story_id in seen:
+            continue
+        seen.add(story_id)
+        story_ids.append(story_id)
+        if len(story_ids) >= max_items:
+            break
+
+    filtered = []
+    for story_id in story_ids:
         try:
             item_resp = requests.get(f"https://hacker-news.firebaseio.com/v0/item/{story_id}.json", timeout=10)
             item_resp.raise_for_status()
             item = item_resp.json() or {}
-            stories.append({
-                "id": item.get("id"),
-                "title": item.get("title"),
-                "url": item.get("url"),
-                "by": item.get("by"),
-                "time": item.get("time"),
-            })
+            title = (item.get("title") or "").lower()
+            if not title:
+                continue
+
+            if any(keyword in title for keyword in keywords):
+                filtered.append({
+                    "title": item.get("title"),
+                    "url": item.get("url") or f"https://news.ycombinator.com/item?id={story_id}",
+                    "points": item.get("score", 0),
+                })
         except Exception:
             continue
-    return stories
+
+    return filtered
 
 
 def summarize(content: dict) -> str:
-    """Summarize fetched content into a digest using the Anthropic API.
+    """Summarize fetched content into a weekly digest using Anthropic.
 
-    If no summarization is available, return an empty string to allow
-    the caller to build a fallback digest.
+    Returns a concise HTML digest grouped into three sections for a data scientist.
     """
-    return ""
+    api_key = os.getenv("ANTHROPIC_API_KEY")
+    if not api_key:
+        print("Missing ANTHROPIC_API_KEY in environment; cannot summarize.")
+        return ""
+
+    papers = content.get("papers", []) or []
+    repos = content.get("repos", []) or []
+    news = content.get("news", []) or []
+
+    def format_items(items, item_keys):
+        if not items:
+            return "<p>No entries found this week.</p>"
+        formatted = ""
+        for item in items:
+            values = [str(item.get(k, "")).strip() for k in item_keys if item.get(k) is not None]
+            formatted += "<li>" + " — ".join(values) + "</li>"
+        return f"<ul>{formatted}</ul>"
+
+    paper_section = format_items(papers, ["title", "authors", "link"])
+    repo_section = format_items(repos, ["name", "description", "stars", "url"])
+    news_section = format_items(news, ["title", "points", "url"])
+
+    prompt = f"""
+You are a helpful assistant that writes concise weekly digests for data scientists.
+Produce a short HTML document with three sections: Papers, Repositories, and News.
+Each section should have a heading and a short summary of why the content matters.
+Use valid HTML only, without markdown, code fences, or extra commentary.
+Include only the digest markup in the response.
+
+Papers:
+{paper_section}
+
+Repositories:
+{repo_section}
+
+News:
+{news_section}
+
+Return the digest as HTML. Use headings, paragraphs, and lists. Keep it concise.
+"""
+
+    client = anthropic.Client(api_key=api_key)
+    try:
+        response = client.messages.create(
+            model="claude-haiku-4-5-20251001",
+            system="You are a concise summarization assistant for data scientists.",
+            messages=[
+                {
+                    "role": "user",
+                    "content": prompt,
+                },
+            ],
+            max_tokens=800,
+            temperature=0.2,
+        )
+        content_blocks = getattr(response, "content", [])
+        if not content_blocks:
+            return str(response)
+        return "".join(getattr(block, "text", "") for block in content_blocks)
+    except Exception as exc:
+        print(f"Anthropic summarization failed: {exc}")
+        return ""
 
 
 def send_email(subject: str, body: str) -> None:
